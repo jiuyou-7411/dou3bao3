@@ -1015,32 +1015,32 @@ async def temp_tokens_delete(token_id: str):
     return {"ok": True}
 
 
-@app.get("/models", dependencies=[Depends(require_token)])
-@app.get("/v1/models", dependencies=[Depends(require_token)])
-@app.get("/v1/v1/models", dependencies=[Depends(require_token)])
+@app.get("/models")
+@app.get("/v1/models")
+@app.get("/v1/v1/models")
 async def openai_models():
     return _model_list()
 
 
-@app.get("/models/{model_id}", dependencies=[Depends(require_token)])
-@app.get("/v1/models/{model_id}", dependencies=[Depends(require_token)])
-@app.get("/v1/v1/models/{model_id}", dependencies=[Depends(require_token)])
+@app.get("/models/{model_id}")
+@app.get("/v1/models/{model_id}")
+@app.get("/v1/v1/models/{model_id}")
 async def openai_model(model_id: str):
     if model_id != _video_model_id():
         return _openai_error(f"model '{model_id}' is not available", status_code=404, code="model_not_found")
     return _model_body(model_id)
 
 
-@app.get("/engines", dependencies=[Depends(require_token)])
-@app.get("/v1/engines", dependencies=[Depends(require_token)])
-@app.get("/v1/v1/engines", dependencies=[Depends(require_token)])
+@app.get("/engines")
+@app.get("/v1/engines")
+@app.get("/v1/v1/engines")
 async def openai_engines():
     return _model_list()
 
 
-@app.get("/engines/{engine_id}", dependencies=[Depends(require_token)])
-@app.get("/v1/engines/{engine_id}", dependencies=[Depends(require_token)])
-@app.get("/v1/v1/engines/{engine_id}", dependencies=[Depends(require_token)])
+@app.get("/engines/{engine_id}")
+@app.get("/v1/engines/{engine_id}")
+@app.get("/v1/v1/engines/{engine_id}")
 async def openai_engine(engine_id: str):
     if engine_id != _video_model_id():
         return _openai_error(f"engine '{engine_id}' is not available", status_code=404, code="model_not_found")
