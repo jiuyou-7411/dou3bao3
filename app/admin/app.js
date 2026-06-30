@@ -577,11 +577,14 @@ async function applyHotUpdate() {
   try {
     const data = await apiFetch("/admin/update", {
       method: "POST",
-      body: { branch: "main", restart: true },
+      body: { branch: "main", restart: true, restart_method: "exit" },
     });
     renderUpdateStatus(data.status || data);
-    toast("更新已触发，服务即将重启");
-    if (els.updateState) els.updateState.textContent = "重启中";
+    const before = data.before || "-";
+    const after = data.after || "-";
+    const changed = Boolean(data.changed);
+    toast(changed ? `\u5df2\u62c9\u53d6\u65b0\u7248\u672c\uff1a${before} -> ${after}\uff0c\u670d\u52a1\u5373\u5c06\u91cd\u542f` : `\u672a\u53d1\u73b0\u65b0\u7248\u672c\uff1a${before} -> ${after}\uff0c\u5df2\u89e6\u53d1\u91cd\u542f`);
+    if (els.updateState) els.updateState.textContent = data.restart ? "\u91cd\u542f\u4e2d" : "\u5df2\u66f4\u65b0";
   } catch (error) {
     toast(`更新失败：${error.message}`, "error");
     if (els.updateState) els.updateState.textContent = "更新失败";
@@ -1281,7 +1284,9 @@ function bindEvents() {
     setBusy(els.checkUpdate, true, "检查中");
     try {
       const data = await checkUpdateStatus({ checkRemote: true });
-      toast(data?.has_update ? "发现新版本" : "当前已是最新版本");
+      const current = data?.commit || "-";
+      const remote = data?.remote_commit || "-";
+      toast(data?.has_update ? `\u53d1\u73b0\u65b0\u7248\u672c\uff1a${current} -> ${remote}` : `\u68c0\u67e5\u5b8c\u6210\uff1a\u5f53\u524d ${current}\uff0c\u8fdc\u7aef ${remote}\uff0c\u4e0d\u4f1a\u81ea\u52a8\u66f4\u65b0`);
     } catch (error) {
       toast(`检查失败：${error.message}`, "error");
       if (els.updateState) els.updateState.textContent = "检查失败";
