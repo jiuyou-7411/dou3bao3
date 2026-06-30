@@ -655,6 +655,9 @@ def _video_generation_body(response: dict[str, Any]) -> dict[str, Any]:
     status = str(response.get("status") or "queued")
     body = {
         "id": task_id,
+        "task_id": task_id,
+        "video_id": task_id,
+        "response_id": task_id,
         "object": "video.generation",
         "created": int(response.get("created_at") or time.time()),
         "model": str(response.get("model") or _video_model_id()),
@@ -663,6 +666,7 @@ def _video_generation_body(response: dict[str, Any]) -> dict[str, Any]:
         "content_url": video_url,
         "video": {
             "id": task_id,
+            "task_id": task_id,
             "status": status,
             "url": video_url,
             "content_url": video_url,
