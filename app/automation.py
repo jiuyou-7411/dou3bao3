@@ -303,9 +303,11 @@ async ({prompt, ratio, duration, model, resolution, attachments}) => {
   function buildPayload({localConversationId}) {
     const collectionId = uuid();
     const uniqueKey = uuid();
+    const imageUrls = (attachments || []).map(item => item && item.uri).filter(Boolean);
     const textParts = [prompt];
     if (ratio) textParts.push(ratio);
-    const text = `\u751f\u6210\u89c6\u9891\uff1a${textParts.filter(Boolean).join("\uff0c")}`;
+    const textPrefix = imageUrls.length ? "\u53c2\u8003\u56fe\u751f\u6210\u89c6\u9891" : "\u751f\u6210\u89c6\u9891";
+    const text = `${textPrefix}\uff1a${textParts.filter(Boolean).join("\uff0c")}`;
     const messages = [];
     if (attachments && attachments.length) {
       messages.push({
@@ -412,7 +414,14 @@ async ({prompt, ratio, duration, model, resolution, attachments}) => {
       },
       chat_ability: {
         ability_type: 17,
-        ability_param: JSON.stringify({ ratio, model, duration: Number(duration) })
+        ability_param: JSON.stringify({
+          ratio,
+          model,
+          duration: Number(duration),
+          image_url: imageUrls[0] || "",
+          image_urls: imageUrls,
+          reference_images: imageUrls
+        })
       },
       user_context: [],
       ext: {
