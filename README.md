@@ -1,3 +1,7 @@
+## API 文档
+
+接口调用说明见 [API_DOCUMENTATION.md](API_DOCUMENTATION.md)。
+
 # dola_fetch_service
 
 这是一个基于 FastAPI + Playwright 的任务服务，带 Web 管理面板、任务队列、代理提取 API 配置、并发控制和视频结果查询能力。
