@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import shutil
 import time
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -54,6 +56,25 @@ create_sem = None
 query_sem = None
 list_sem = None
 delete_sem = None
+
+IMAGE_FORM_KEYS = {
+    "image",
+    "images",
+    "file",
+    "files",
+    "reference_image",
+    "reference_images",
+}
+IMAGE_VALUE_KEYS = {
+    "image",
+    "images",
+    "image_url",
+    "image_urls",
+    "input_image",
+    "input_images",
+    "reference_image",
+    "reference_images",
+}
 
 
 @asynccontextmanager
@@ -181,6 +202,30 @@ async def _openai_payload(request: Request) -> dict[str, Any]:
     return {"input": body_text} if body_text else {}
 
 
+async def _openai_payload_and_uploads(request: Request) -> tuple[dict[str, Any], list[Any]]:
+    content_type = request.headers.get("content-type", "").lower()
+    if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        payload: dict[str, Any] = {}
+        uploads: list[Any] = []
+        for key, value in form.multi_items():
+            key = str(key)
+            is_upload = hasattr(value, "filename") and hasattr(value, "file")
+            if is_upload and key in IMAGE_FORM_KEYS and getattr(value, "filename", ""):
+                uploads.append(value)
+                continue
+            if key in payload:
+                existing = payload[key]
+                if isinstance(existing, list):
+                    existing.append(value)
+                else:
+                    payload[key] = [existing, value]
+            else:
+                payload[key] = value
+        return payload, uploads
+    return await _openai_payload(request), []
+
+
 def _truthy(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -202,11 +247,21 @@ def _extract_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
+        if str(value.get("type") or "").lower() in {"image_url", "input_image", "input_image_url"}:
+            return ""
         if isinstance(value.get("text"), str):
             return value["text"]
         if isinstance(value.get("content"), str):
             return value["content"]
-        return " ".join(part for part in (_extract_text(item) for item in value.values()) if part)
+        return " ".join(
+            part
+            for part in (
+                _extract_text(item)
+                for key, item in value.items()
+                if str(key) not in IMAGE_VALUE_KEYS
+            )
+            if part
+        )
     if isinstance(value, list):
         return " ".join(part for part in (_extract_text(item) for item in value) if part)
     return str(value)
@@ -221,6 +276,104 @@ def _openai_prompt(payload: dict[str, Any]) -> str:
     if isinstance(messages, list):
         return _extract_text(messages).strip()
     return ""
+
+
+def _image_url_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        nested = value.get("url") or value.get("image_url") or value.get("data")
+        if isinstance(nested, (str, dict)):
+            return _image_url_value(nested)
+    return ""
+
+
+def _collect_image_refs(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, dict):
+        item_type = str(value.get("type") or "").lower()
+        if item_type in {"image_url", "input_image", "input_image_url"}:
+            ref = _image_url_value(value.get("image_url") or value.get("url") or value.get("data"))
+            if ref:
+                refs.append(ref)
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in IMAGE_VALUE_KEYS:
+                if isinstance(item, list):
+                    refs.extend(ref for ref in (_image_url_value(entry) for entry in item) if ref)
+                else:
+                    ref = _image_url_value(item)
+                    if ref:
+                        refs.append(ref)
+                    refs.extend(_collect_image_refs(item))
+            elif isinstance(item, (dict, list)):
+                refs.extend(_collect_image_refs(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.extend(_collect_image_refs(item))
+    return list(dict.fromkeys(refs))
+
+
+def _suffix_from_content_type(content_type: str, fallback: str = ".png") -> str:
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    mapping = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    return mapping.get(content_type, fallback)
+
+
+async def _image_bytes_from_ref(ref: str) -> tuple[bytes, str]:
+    value = str(ref or "").strip()
+    if not value:
+        raise ValueError("empty image reference")
+    if value.startswith("data:"):
+        header, _, data = value.partition(",")
+        if not data:
+            raise ValueError("invalid data url")
+        suffix = _suffix_from_content_type(header[5:].split(";", 1)[0])
+        return base64.b64decode(data), suffix
+    if value.startswith("http://") or value.startswith("https://"):
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=False) as client:
+            response = await client.get(value)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if not content_type.lower().startswith("image/"):
+                raise ValueError("image url did not return an image")
+            return response.content, _suffix_from_content_type(content_type)
+    return base64.b64decode(value), ".png"
+
+
+async def _save_openai_images(task_id: str, uploads: list[Any], refs: list[str]) -> list[Path]:
+    uploads = [item for item in uploads if item and getattr(item, "filename", "")]
+    refs = [item for item in refs if str(item or "").strip()]
+    total = len(uploads) + len(refs)
+    if total > load_settings().max_image_count:
+        raise HTTPException(status_code=400, detail="too many images")
+    saved_paths: list[Path] = []
+    for upload in uploads:
+        filename = Path(getattr(upload, "filename", "") or f"image_{len(saved_paths) + 1}.png").name
+        suffix = Path(filename).suffix.lower() or ".png"
+        target = images_dir(task_id) / f"{len(saved_paths) + 1:02d}{suffix}"
+        with target.open("wb") as out:
+            upload.file.seek(0)
+            shutil.copyfileobj(upload.file, out)
+        saved_paths.append(target)
+    for ref in refs:
+        try:
+            data, suffix = await _image_bytes_from_ref(ref)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid image reference: {exc}")
+        target = images_dir(task_id) / f"{len(saved_paths) + 1:02d}{suffix}"
+        target.write_bytes(data)
+        saved_paths.append(target)
+    if saved_paths:
+        set_task_images(task_id, saved_paths)
+    return saved_paths
 
 
 def _public_base_url(request: Request) -> str:
@@ -387,7 +540,13 @@ def _chat_completion_body(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _create_openai_task(access: AccessContext, prompt: str, ratio: str) -> dict[str, Any]:
+async def _create_openai_task(
+    access: AccessContext,
+    prompt: str,
+    ratio: str,
+    uploads: list[Any] | None = None,
+    image_refs: list[str] | None = None,
+) -> dict[str, Any]:
     assert create_sem is not None
     async with create_sem:
         prompt = repair_text((prompt or "").strip())
@@ -404,11 +563,19 @@ async def _create_openai_task(access: AccessContext, prompt: str, ratio: str) ->
             raise HTTPException(status_code=429, detail=str(exc))
 
         try:
-            return create_task(prompt, ratio, owner_token_hash=access.token_hash if access.is_temp else "")
+            meta = create_task(prompt, ratio, owner_token_hash=access.token_hash if access.is_temp else "")
         except Exception:
             if reserved_access:
                 refund_temp_quota(reserved_access)
             raise
+        try:
+            await _save_openai_images(meta["id"], uploads or [], image_refs or [])
+        except Exception:
+            if reserved_access:
+                refund_temp_quota(reserved_access)
+            delete_task(meta["id"])
+            raise
+        return meta
 
 
 async def _query_openai_task(access: AccessContext, task_id: str) -> tuple[dict[str, Any], dict[str, str]]:
@@ -641,7 +808,7 @@ async def openai_create_response(
     request: Request,
     access: Annotated[AccessContext, Depends(require_token)],
 ):
-    payload = await _openai_payload(request)
+    payload, uploads = await _openai_payload_and_uploads(request)
     prompt = _openai_prompt(payload)
     ratio = str(payload.get("ratio") or payload.get("aspect_ratio") or DEFAULT_RATIO).strip()
     wait = _truthy(payload.get("wait"), False)
@@ -650,7 +817,7 @@ async def openai_create_response(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="timeout_seconds must be an integer")
 
-    meta = await _create_openai_task(access, prompt, ratio)
+    meta = await _create_openai_task(access, prompt, ratio, uploads, _collect_image_refs(payload))
     if wait:
         return await _wait_openai_task(
             access=access,
@@ -666,7 +833,7 @@ async def openai_chat_completions(
     request: Request,
     access: Annotated[AccessContext, Depends(require_token)],
 ):
-    payload = await _openai_payload(request)
+    payload, uploads = await _openai_payload_and_uploads(request)
     prompt = _openai_prompt(payload)
     if not prompt:
         prompt = "test video generation"
@@ -677,7 +844,7 @@ async def openai_chat_completions(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="timeout_seconds must be an integer")
 
-    meta = await _create_openai_task(access, prompt, ratio)
+    meta = await _create_openai_task(access, prompt, ratio, uploads, _collect_image_refs(payload))
     if wait:
         response = await _wait_openai_task(
             access=access,
@@ -695,7 +862,7 @@ async def openai_image_generations(
     request: Request,
     access: Annotated[AccessContext, Depends(require_token)],
 ):
-    payload = await _openai_payload(request)
+    payload, uploads = await _openai_payload_and_uploads(request)
     prompt = _openai_prompt(payload)
     ratio = str(payload.get("ratio") or payload.get("aspect_ratio") or DEFAULT_RATIO).strip()
     wait = _truthy(payload.get("wait"), False)
@@ -703,7 +870,7 @@ async def openai_image_generations(
         timeout_seconds = int(payload.get("timeout_seconds") or payload.get("max_wait_seconds") or 240)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="timeout_seconds must be an integer")
-    meta = await _create_openai_task(access, prompt, ratio)
+    meta = await _create_openai_task(access, prompt, ratio, uploads, _collect_image_refs(payload))
     if wait:
         response = await _wait_openai_task(
             access=access,
