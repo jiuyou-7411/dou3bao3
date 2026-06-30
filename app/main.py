@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import re
+import subprocess
+import sys
 import shutil
 import time
 from contextlib import asynccontextmanager
@@ -56,6 +60,7 @@ create_sem = None
 query_sem = None
 list_sem = None
 delete_sem = None
+update_lock = None
 
 IMAGE_FORM_KEYS = {
     "image",
@@ -81,13 +86,14 @@ IMAGE_VALUE_KEYS = {
 async def lifespan(app: FastAPI):
     import asyncio
 
-    global create_sem, query_sem, list_sem, delete_sem
+    global create_sem, query_sem, list_sem, delete_sem, update_lock
     ensure_config()
     ensure_temp_tokens()
     create_sem = asyncio.Semaphore(2)
     query_sem = asyncio.Semaphore(5)
     list_sem = asyncio.Semaphore(1)
     delete_sem = asyncio.Semaphore(1)
+    update_lock = asyncio.Lock()
     await manager.start()
     try:
         yield
@@ -96,7 +102,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Fetch Task Service", lifespan=lifespan)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ADMIN_DIR = Path(__file__).resolve().parent / "admin"
+UPDATE_REMOTE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+UPDATE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 if ADMIN_DIR.exists():
     app.mount("/admin/assets", StaticFiles(directory=ADMIN_DIR), name="admin-assets")
@@ -136,6 +145,64 @@ async def require_temp(access: Annotated[AccessContext, Depends(require_token)])
     return access
 
 
+
+def _sanitize_git_remote(value: str) -> str:
+    if "://" not in value:
+        return value
+    scheme, rest = value.split("://", 1)
+    host = rest.split("/", 1)[0]
+    if "@" not in host:
+        return value
+    return f"{scheme}://***@{rest.split('@', 1)[1]}"
+
+
+def _git_result(args: list[str], timeout: int = 90) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="git is not installed in this container")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="git command timed out")
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    return {"ok": completed.returncode == 0, "code": completed.returncode, "stdout": stdout, "stderr": stderr}
+
+
+def _git_required(args: list[str], timeout: int = 90) -> dict[str, Any]:
+    result = _git_result(args, timeout=timeout)
+    if not result["ok"]:
+        message = result["stderr"] or result["stdout"] or "git command failed"
+        raise HTTPException(status_code=500, detail=message[-500:])
+    return result
+
+
+def _git_status_payload() -> dict[str, Any]:
+    if not (PROJECT_ROOT / ".git").exists():
+        return {"available": False, "root": str(PROJECT_ROOT), "message": ".git directory is missing"}
+    branch = _git_result(["rev-parse", "--abbrev-ref", "HEAD"])
+    commit = _git_result(["rev-parse", "--short", "HEAD"])
+    remote = _git_result(["config", "--get", "remote.origin.url"])
+    dirty = _git_result(["status", "--porcelain"])
+    return {
+        "available": True,
+        "root": str(PROJECT_ROOT),
+        "branch": branch["stdout"] if branch["ok"] else "",
+        "commit": commit["stdout"] if commit["ok"] else "",
+        "remote": _sanitize_git_remote(remote["stdout"]) if remote["ok"] else "",
+        "dirty": bool(dirty["stdout"]) if dirty["ok"] else None,
+    }
+
+
+async def _restart_current_process(delay_seconds: float = 1.0) -> None:
+    await asyncio.sleep(delay_seconds)
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 def _json(data: dict | list, status_code: int = 200) -> JSONResponse:
     return JSONResponse(content=data, status_code=status_code)
 
@@ -618,6 +685,40 @@ async def client_auth(access: Annotated[AccessContext, Depends(require_temp)]):
     return _health_payload(access)
 
 
+
+@app.get("/admin/update/status", dependencies=[Depends(require_admin)])
+async def admin_update_status(access: Annotated[AccessContext, Depends(require_admin)]):
+    return _git_status_payload()
+
+
+@app.post("/admin/update", dependencies=[Depends(require_admin)])
+async def admin_update(
+    request: Request,
+    access: Annotated[AccessContext, Depends(require_admin)],
+):
+    assert update_lock is not None
+    payload = await _request_payload(request)
+    remote = str(payload.get("remote") or "origin").strip()
+    current = _git_status_payload()
+    branch = str(payload.get("branch") or current.get("branch") or "main").strip()
+    restart = str(payload.get("restart") or "true").strip().lower() not in {"0", "false", "no", "off"}
+
+    if not current.get("available"):
+        raise HTTPException(status_code=409, detail="git metadata is missing; redeploy once with the new Dockerfile first")
+    if not UPDATE_REMOTE_RE.fullmatch(remote):
+        raise HTTPException(status_code=400, detail="invalid git remote name")
+    if not UPDATE_BRANCH_RE.fullmatch(branch) or branch.startswith("-") or ".." in branch:
+        raise HTTPException(status_code=400, detail="invalid git branch name")
+
+    async with update_lock:
+        before = _git_required(["rev-parse", "--short", "HEAD"])["stdout"]
+        await asyncio.to_thread(_git_required, ["fetch", "--prune", remote, branch], 180)
+        await asyncio.to_thread(_git_required, ["reset", "--hard", f"{remote}/{branch}"], 90)
+        after = _git_required(["rev-parse", "--short", "HEAD"])["stdout"]
+        status = _git_status_payload()
+        if restart:
+            asyncio.create_task(_restart_current_process())
+        return {"ok": True, "before": before, "after": after, "branch": branch, "restart": restart, "status": status}
 @app.get("/admin", include_in_schema=False)
 @app.get("/admin/", include_in_schema=False)
 async def admin_panel():
@@ -1031,6 +1132,6 @@ async def remove_task(access: Annotated[AccessContext, Depends(require_token)], 
         if access.is_temp and str(meta.get("owner_token_hash") or "") != access.token_hash:
             raise HTTPException(status_code=404, detail="task not found")
         if task_id in active_task_ids():
-            return _json({"ok": False, "message": "该任务已在生成不可取消"}, status_code=409)
+            return _json({"ok": False, "message": "task is running and cannot be deleted"}, status_code=409)
         delete_task(task_id)
         return {"ok": True}
