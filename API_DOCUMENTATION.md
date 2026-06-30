@@ -54,6 +54,8 @@ curl "https://你的域名/v1/models" \
   -H "Authorization: Bearer dfyue-video-fixed-token"
 ```
 
+兼容路径：`/models`、`/v1/v1/models`。如果上游平台会自动拼接 `/v1`，API 地址填域名即可；如果误填了带 `/v1` 的地址，兼容路径也能返回模型。
+
 响应示例：
 
 ```json
@@ -63,8 +65,11 @@ curl "https://你的域名/v1/models" \
     {
       "id": "dfyue-video",
       "object": "model",
-      "created": 1780000000,
-      "owned_by": "dfyue"
+      "created": 0,
+      "owned_by": "dfyue",
+      "root": "dfyue-video",
+      "parent": null,
+      "permission": []
     }
   ]
 }

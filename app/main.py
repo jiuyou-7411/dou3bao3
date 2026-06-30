@@ -540,27 +540,22 @@ def _openai_output_text(status: str, task_id: str, video_url: str, text: str) ->
     return f"video task {task_id} is {status}"
 
 
-def _model_list() -> dict[str, Any]:
-    now = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "dfyue-video",
-                "object": "model",
-                "created": now,
-                "owned_by": "dfyue",
-            }
-        ],
-    }
-
-
 def _model_body(model: str = "dfyue-video") -> dict[str, Any]:
     return {
         "id": model,
         "object": "model",
-        "created": int(time.time()),
+        "created": 0,
         "owned_by": "dfyue",
+        "root": model,
+        "parent": None,
+        "permission": [],
+    }
+
+
+def _model_list() -> dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [_model_body("dfyue-video")],
     }
 
 
@@ -976,24 +971,32 @@ async def temp_tokens_delete(token_id: str):
     return {"ok": True}
 
 
+@app.get("/models", dependencies=[Depends(require_token)])
 @app.get("/v1/models", dependencies=[Depends(require_token)])
+@app.get("/v1/v1/models", dependencies=[Depends(require_token)])
 async def openai_models():
     return _model_list()
 
 
+@app.get("/models/{model_id}", dependencies=[Depends(require_token)])
 @app.get("/v1/models/{model_id}", dependencies=[Depends(require_token)])
+@app.get("/v1/v1/models/{model_id}", dependencies=[Depends(require_token)])
 async def openai_model(model_id: str):
     if model_id != "dfyue-video":
         return _openai_error(f"model '{model_id}' is not available", status_code=404, code="model_not_found")
     return _model_body(model_id)
 
 
+@app.get("/engines", dependencies=[Depends(require_token)])
 @app.get("/v1/engines", dependencies=[Depends(require_token)])
+@app.get("/v1/v1/engines", dependencies=[Depends(require_token)])
 async def openai_engines():
     return _model_list()
 
 
+@app.get("/engines/{engine_id}", dependencies=[Depends(require_token)])
 @app.get("/v1/engines/{engine_id}", dependencies=[Depends(require_token)])
+@app.get("/v1/v1/engines/{engine_id}", dependencies=[Depends(require_token)])
 async def openai_engine(engine_id: str):
     if engine_id != "dfyue-video":
         return _openai_error(f"engine '{engine_id}' is not available", status_code=404, code="model_not_found")
