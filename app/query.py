@@ -232,13 +232,13 @@ def _collect_strings(value: Any, depth: int = 0) -> list[str]:
 
 def _extract_wait_text(data: Any) -> str:
     values: list[str] = []
-    pattern = re.compile(r"预计等待\s*[^。！？\n\r，,]*?(?:分钟|秒|小时)")
+    pattern = re.compile(r"\u9884\u8ba1\u7b49\u5f85\s*[^\u3002\uff01\uff1f\n\r\uff0c,]*?(?:\u5206\u949f|\u79d2|\u5c0f\u65f6)")
     for raw_text in _collect_strings(data):
         text = repair_text(raw_text)
         for match in pattern.findall(text):
             if match and match not in values:
                 values.append(match)
-    return "；".join(values)
+    return "\uff1b".join(values)
 
 
 def extract_tts_content(data: Any) -> str:
@@ -259,6 +259,36 @@ def extract_tts_content(data: Any) -> str:
     if wait_text:
         return f"{text}{wait_text}" if text else wait_text
     return text
+
+
+def _text_has_video_pending_signal(value: str) -> bool:
+    text = repair_text(str(value or ""))
+    if "has_video_gen" in text or "\u6b63\u5728\u521b\u4f5c" in text:
+        return True
+    if "Seedance" in text and (
+        "\u9884\u8ba1\u7b49\u5f85" in text
+        or "\u89c6\u9891\u751f\u6210\u597d\u540e" in text
+        or "\u89c6\u9891\u751f\u6210\u989d\u5ea6" in text
+    ):
+        return True
+    if "\u9884\u8ba1\u7b49\u5f85" in text and "\u89c6\u9891" in text:
+        return True
+    return False
+
+
+def has_video_generation_signal(data: Any) -> bool:
+    for item in _walk(data):
+        if not isinstance(item, dict):
+            continue
+        ext = item.get("ext")
+        if isinstance(ext, dict) and str(ext.get("has_video_gen") or "") == "1":
+            return True
+        if isinstance(ext, str) and _text_has_video_pending_signal(ext):
+            return True
+        loading_block = item.get("loading_block")
+        if loading_block and _text_has_video_pending_signal(str(loading_block)):
+            return True
+    return _text_has_video_pending_signal("\n".join(_collect_strings(data)))
 
 
 def decode_main_url(value: str) -> str:
@@ -292,14 +322,14 @@ async def fetch_recent_conversation_id(cookie: str, identity: dict[str, str]) ->
     return extract_conversation_id(data)
 
 
-async def fetch_single_chain(cookie: str, conversation_id: str, identity: dict[str, str]) -> tuple[str, str]:
+async def fetch_single_chain(cookie: str, conversation_id: str, identity: dict[str, str]) -> tuple[str, str, bool]:
     data = await _post_json(_query_url("/im/chain/single", identity), _headers(cookie), _single_payload(conversation_id))
-    return extract_main_url(data), extract_tts_content(data)
+    return extract_main_url(data), extract_tts_content(data), has_video_generation_signal(data)
 
 
-async def fetch_conversation_info(cookie: str, conversation_id: str, identity: dict[str, str]) -> tuple[str, str]:
+async def fetch_conversation_info(cookie: str, conversation_id: str, identity: dict[str, str]) -> tuple[str, str, bool]:
     data = await _post_json(_query_url("/im/conversation/info", identity), _headers(cookie), _conversation_info_payload(conversation_id))
-    return extract_main_url(data), extract_tts_content(data)
+    return extract_main_url(data), extract_tts_content(data), has_video_generation_signal(data)
 
 
 async def query_task(task_id: str) -> dict[str, str]:
@@ -324,12 +354,15 @@ async def query_task(task_id: str) -> dict[str, str]:
         or result.get("chat_response_preview")
         or ""
     )
+    video_pending = _text_has_video_pending_signal(sse_text)
     conversation_id = extract_conversation_id_from_sse(sse_text)
     if conversation_id:
         save_result(task_id, conversation_id=conversation_id)
     if not conversation_id:
         conversation_id = str(result.get("conversation_id") or "")
     if not conversation_id:
+        if video_pending:
+            return {"code": "0", "text": "", "url": ""}
         try:
             conversation_id = await fetch_recent_conversation_id(cookie, identity)
         except Exception as exc:
@@ -339,22 +372,29 @@ async def query_task(task_id: str) -> dict[str, str]:
             save_result(task_id, conversation_id=conversation_id)
 
     if not conversation_id:
+        if video_pending:
+            return {"code": "0", "text": "", "url": ""}
         return {"code": "1", "text": "没有文本", "url": ""}
 
     try:
-        main_url_encoded, tts_content = await fetch_conversation_info(cookie, conversation_id, identity)
+        main_url_encoded, tts_content, info_pending = await fetch_conversation_info(cookie, conversation_id, identity)
+        video_pending = video_pending or info_pending
     except Exception as exc:
         first_error = str(exc)
         try:
-            main_url_encoded, tts_content = await fetch_single_chain(cookie, conversation_id, identity)
+            main_url_encoded, tts_content, chain_pending = await fetch_single_chain(cookie, conversation_id, identity)
+            video_pending = video_pending or chain_pending
         except Exception as fallback_exc:
             save_result(task_id, extra={"last_query_error": f"conversation_info: {first_error} | single_chain: {fallback_exc}"})
+            if video_pending:
+                return {"code": "0", "text": "", "url": ""}
             return {"code": "1", "text": "没有文本", "url": ""}
 
     if not main_url_encoded:
         try:
-            main_url_encoded, fallback_tts = await fetch_single_chain(cookie, conversation_id, identity)
+            main_url_encoded, fallback_tts, fallback_pending = await fetch_single_chain(cookie, conversation_id, identity)
             tts_content = tts_content or fallback_tts
+            video_pending = video_pending or fallback_pending
         except Exception as fallback_exc:
             save_result(task_id, extra={"last_query_error": f"single_chain: {fallback_exc}"})
 
@@ -368,4 +408,9 @@ async def query_task(task_id: str) -> dict[str, str]:
             )
             return {"code": "2", "text": "", "url": decoded}
 
-    return {"code": "1", "text": tts_content or "没有文本", "url": ""}
+    if video_pending:
+        return {"code": "0", "text": "", "url": ""}
+
+    if tts_content:
+        save_result(task_id, extra={"last_query_text": tts_content[:1000]})
+    return {"code": "0", "text": "", "url": ""}
