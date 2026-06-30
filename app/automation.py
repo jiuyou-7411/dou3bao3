@@ -16,7 +16,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 import httpx
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
-from .config import TARGET_URL, browser_proxy_config_for, load_settings
+from .config import TARGET_URL, browser_proxy_config_for, load_settings, normalize_video_model
 from .proxy_manager import fetch_proxy_from_api
 from .store import (
     clear_transient_result,
@@ -643,7 +643,7 @@ class DolaFetchAutomation:
         self.ratio = ratio
         self.settings = load_settings()
         self.duration = duration or self.settings.video_duration
-        self.model = model or self.settings.video_model
+        self.model = normalize_video_model(model or self.settings.video_model)
         self.resolution = resolution
         self.uploaded_images: list[dict[str, Any]] = []
 

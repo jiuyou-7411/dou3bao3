@@ -21,10 +21,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from .config import (
+    CANONICAL_VIDEO_MODEL,
     DEFAULT_RATIO,
     VALID_RATIOS,
     ensure_config,
     load_settings,
+    normalize_video_model,
     update_config,
     validate_proxy_api_scheme,
     validate_proxy_api_url,
@@ -575,7 +577,7 @@ def _openai_output_text(status: str, task_id: str, video_url: str, text: str) ->
 
 
 def _video_model_id() -> str:
-    return load_settings().video_model
+    return normalize_video_model(load_settings().video_model)
 
 
 def _known_model_ids() -> list[str]:
@@ -584,6 +586,16 @@ def _known_model_ids() -> list[str]:
 
 def _model_kind(model_id: str) -> str:
     return "video"
+
+
+def _validate_requested_model(payload: dict[str, Any]) -> str:
+    requested = str(payload.get("model") or "").strip()
+    if requested and requested != CANONICAL_VIDEO_MODEL:
+        raise HTTPException(
+            status_code=404,
+            detail=f"model '{requested}' is not available; use '{CANONICAL_VIDEO_MODEL}'",
+        )
+    return CANONICAL_VIDEO_MODEL
 
 
 def _model_body(model: str | None = None) -> dict[str, Any]:
@@ -712,9 +724,10 @@ def _video_resolution(payload: dict[str, Any]) -> str:
 
 
 def _video_options(payload: dict[str, Any], ratio: str) -> dict[str, Any]:
+    requested_model = _validate_requested_model(payload)
     options: dict[str, Any] = {
         "video_model": _video_model_id(),
-        "requested_model": str(payload.get("model") or "").strip(),
+        "requested_model": requested_model,
     }
     duration = _video_duration(payload)
     if duration is not None:
