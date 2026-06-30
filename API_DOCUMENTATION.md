@@ -27,6 +27,17 @@ The service accepts VividAI-style OpenAI calls:
 
 `size` values such as `1280x720`, `720x1280`, and `2048x2048` are automatically mapped to the closest supported video ratio. `seconds` is accepted for compatibility but current generation duration is controlled by the upstream video service.
 
+Video parameter mapping:
+
+| Input field | Effect |
+| --- | --- |
+| `ratio` / `aspect_ratio` | Directly sets the video ratio when it is one of the supported ratios. |
+| `size` / `resolution` | Accepts values such as `1280x720`, maps to ratio, and is saved as task resolution. |
+| `width` + `height` | Builds a resolution value such as `1280x720`. |
+| `seconds` / `duration` / `duration_seconds` / `video_duration` | Sets per-task video duration, clamped to 1-60 seconds. |
+| `@alias` in prompt | Binds a fixed reference image from `data/reference_images/alias.png` or `data/references/alias.png`. |
+| `reference_alias` / `fixed_image` / `bind_image` | Explicitly binds a fixed reference image without putting `@alias` in the prompt. |
+
 ## Token 权限
 
 | Token 类型 | 用途 | 可调用范围 |
