@@ -104,12 +104,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Fetch Task Service", lifespan=lifespan)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ADMIN_DIR = Path(__file__).resolve().parent / "admin"
+API_DOCUMENTATION_PATH = PROJECT_ROOT / "API_DOCUMENTATION.md"
 UPDATE_REMOTE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 UPDATE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_UPDATE_BRANCH = "main"
 
 if ADMIN_DIR.exists():
     app.mount("/admin/assets", StaticFiles(directory=ADMIN_DIR), name="admin-assets")
+
 
 
 @app.get("/", include_in_schema=False)
@@ -146,6 +148,17 @@ async def require_temp(access: Annotated[AccessContext, Depends(require_token)])
     return access
 
 
+
+
+@app.get("/api-documentation", include_in_schema=False, dependencies=[Depends(require_admin)])
+async def api_documentation():
+    if not API_DOCUMENTATION_PATH.exists():
+        raise HTTPException(status_code=404, detail="api documentation not found")
+    return FileResponse(
+        API_DOCUMENTATION_PATH,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 def _sanitize_git_remote(value: str) -> str:
     if "://" not in value:

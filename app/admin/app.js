@@ -63,6 +63,7 @@ const els = {
   clientEntryUrl: document.getElementById("clientEntryUrl"),
   copyClientEntryUrl: document.getElementById("copyClientEntryUrl"),
   refreshTempTokens: document.getElementById("refreshTempTokens"),
+  openApiDocs: document.getElementById("openApiDocs"),
   openCreateTokenModal: document.getElementById("openCreateTokenModal"),
   tempTokenTableBody: document.getElementById("tempTokenTableBody"),
   workersModal: document.getElementById("workersModal"),
@@ -182,7 +183,7 @@ function toast(message, type = "info") {
   node.className = `toast ${type === "error" ? "error" : ""}`;
   node.textContent = message;
   els.toastStack.appendChild(node);
-  window.setTimeout(() => node.remove(), 100);
+  window.setTimeout(() => node.remove(), 1000);
 }
 
 function setBusy(button, busy, label) {
@@ -586,6 +587,31 @@ async function applyHotUpdate() {
     if (els.updateState) els.updateState.textContent = "更新失败";
   } finally {
     setBusy(els.applyUpdate, false);
+  }
+}
+
+async function openApiDocumentation() {
+  const tab = window.open("", "_blank", "noopener");
+  try {
+    const response = await fetch("/api-documentation", {
+      headers: { "X-API-Token": state.apiToken },
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    if (tab) {
+      tab.location.href = url;
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } else {
+      window.open(url, "_blank", "noopener");
+    }
+  } catch (error) {
+    if (tab) tab.close();
+    toast(`文档打开失败：${error.message}`, "error");
   }
 }
 function openWorkersModal() {
@@ -1241,6 +1267,7 @@ function bindEvents() {
     }
   });
   els.applyUpdate?.addEventListener("click", applyHotUpdate);
+  els.openApiDocs?.addEventListener("click", openApiDocumentation);
   els.refreshTempTokens?.addEventListener("click", () => refreshTempTokens());
   els.openCreateTokenModal?.addEventListener("click", openCreateTokenModal);
   els.editWorkers.addEventListener("click", openWorkersModal);
