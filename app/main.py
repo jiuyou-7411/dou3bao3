@@ -106,6 +106,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ADMIN_DIR = Path(__file__).resolve().parent / "admin"
 UPDATE_REMOTE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 UPDATE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+DEFAULT_UPDATE_BRANCH = "main"
 
 if ADMIN_DIR.exists():
     app.mount("/admin/assets", StaticFiles(directory=ADMIN_DIR), name="admin-assets")
@@ -181,6 +182,13 @@ def _git_required(args: list[str], timeout: int = 90) -> dict[str, Any]:
         message = result["stderr"] or result["stdout"] or "git command failed"
         raise HTTPException(status_code=500, detail=message[-500:])
     return result
+
+
+def _resolve_update_branch(raw_branch: Any, fallback: str = DEFAULT_UPDATE_BRANCH) -> str:
+    branch = str(raw_branch or "").strip()
+    if not branch or branch == "HEAD":
+        return fallback
+    return branch
 
 
 def _git_status_payload() -> dict[str, Any]:
@@ -699,7 +707,7 @@ async def admin_update_status(
 
     assert update_lock is not None
     remote = str(remote or "origin").strip()
-    branch = str(branch or status.get("branch") or "main").strip()
+    branch = _resolve_update_branch(branch or status.get("branch"))
     if not UPDATE_REMOTE_RE.fullmatch(remote):
         raise HTTPException(status_code=400, detail="invalid git remote name")
     if not UPDATE_BRANCH_RE.fullmatch(branch) or branch.startswith("-") or ".." in branch:
@@ -738,7 +746,7 @@ async def admin_update(
     payload = await _request_payload(request)
     remote = str(payload.get("remote") or "origin").strip()
     current = _git_status_payload()
-    branch = str(payload.get("branch") or current.get("branch") or "main").strip()
+    branch = _resolve_update_branch(payload.get("branch") or current.get("branch"))
     restart = str(payload.get("restart") or "true").strip().lower() not in {"0", "false", "no", "off"}
 
     if not current.get("available"):
